@@ -14,9 +14,9 @@ fn main() -> Result<(), errors::Error> {
     let arg2 = args.get(2).ok_or(errors::Error::ArgumentMissing)?;
     let max: u64 = arg2.parse()?;
 
-    let iter = match &arg1[..] {
-        "naive" => Ok(naive::new(max)),
-        "sieve" => Ok(sieve::new(max)),
+    let primes = match &arg1[..] {
+        "naive" => Ok(naive::primes(max)),
+        "sieve" => Ok(sieve::primes(max)),
         _ => Err(errors::Error::InvalidAlgorithm),
     }?;
 
@@ -27,7 +27,7 @@ fn main() -> Result<(), errors::Error> {
     let stdout = stdout.lock();
     let mut stdout = BufWriter::new(stdout);
 
-    for i in iter {
+    for i in primes {
         writeln!(stdout, "{}", i)?;
     }
     Ok(())
