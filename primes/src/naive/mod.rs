@@ -7,7 +7,7 @@ pub struct Primes {
 
 // By boxing it up and returning a trait object, we can use it anywhere an iterator of u64's is
 // needed, so that all of our different implementations can have compatible types.
-pub fn primes(max: u64) -> Box<Iterator<Item = u64>> {
+pub fn primes(max: u64) -> Box<dyn Iterator<Item = u64>> {
     let iter = Primes {
         max,
         next: 1,

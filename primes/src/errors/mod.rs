@@ -16,7 +16,7 @@ fn usage(error: &str) -> String {
 // Required to display errors automatically when returned in a Result from main. We could
 // derive it, but this allows us to format it how we want.
 impl fmt::Debug for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let reason = match self {
             Error::ArgumentMissing => usage("not enough arguments"),
             Error::ArgumentInvalid => usage("max must be a positive integer"),
