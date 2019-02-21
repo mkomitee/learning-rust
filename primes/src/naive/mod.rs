@@ -9,11 +9,11 @@ pub struct Primes {
 // needed, so that all of our different implementations can have compatible types.
 pub fn primes(max: u64) -> Box<Iterator<Item = u64>> {
     let iter = Primes {
-        max: max,
+        max,
         next: 1,
         seen: Vec::new(),
     };
-    return Box::new(iter);
+    Box::new(iter)
 }
 
 impl Iterator for Primes {
@@ -31,6 +31,6 @@ impl Iterator for Primes {
                 return Some(i);
             }
         }
-        return None;
+        None
     }
 }

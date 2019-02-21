@@ -12,11 +12,11 @@ pub fn primes(max: u64) -> Box<Iterator<Item = u64>> {
     eliminated[0] = true;
     eliminated[1] = true;
     let iter = Primes {
-        max: max,
+        max,
         next: 1,
-        eliminated: eliminated,
+        eliminated,
     };
-    return Box::new(iter);
+    Box::new(iter)
 }
 
 impl Iterator for Primes {
@@ -33,6 +33,6 @@ impl Iterator for Primes {
                 return Some(n);
             }
         }
-        return None;
+        None
     }
 }
