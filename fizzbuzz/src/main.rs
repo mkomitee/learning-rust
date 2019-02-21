@@ -12,7 +12,7 @@ enum Error {
 }
 
 impl fmt::Debug for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let reason = match self {
             Error::ArgumentMissing => "not enough arguments specified",
             Error::ArgumentInvalid => "specified argument is invalid",
