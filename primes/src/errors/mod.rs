@@ -22,7 +22,7 @@ impl fmt::Debug for Error {
             Error::ArgumentInvalid => usage("max must be a positive integer"),
             Error::ArgumentOverflow => usage("max too large"),
             Error::InvalidAlgorithm => usage("invalid algorithm"),
-            Error::IO => "io error".to_owned(),
+            Error::IO => String::from("io error"),
         };
         write!(f, "{}", reason)
     }
