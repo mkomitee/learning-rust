@@ -26,11 +26,11 @@ impl fmt::Debug for Error {
 
 impl From<num::ParseIntError> for Error {
     fn from(err: num::ParseIntError) -> Error {
-        return match err.kind() {
+        match err.kind() {
             IntErrorKind::Empty => Error::ArgumentEmpty,
             IntErrorKind::Overflow => Error::ArgumentOverflow,
             _ => Error::ArgumentInvalid,
-        };
+        }
     }
 }
 
