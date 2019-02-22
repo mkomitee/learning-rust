@@ -5,6 +5,8 @@ pub enum Error {
     IO(String),
 }
 
+// Required to have structop parse our Algorithm & display an error if the provided option
+// isn't valid.
 impl string::ToString for Error {
     fn to_string(&self) -> String {
         return format!("{:?}", self);
