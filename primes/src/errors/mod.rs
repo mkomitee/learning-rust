@@ -2,6 +2,7 @@ use std::{fmt, io};
 
 pub enum Error {
     InvalidAlgorithm,
+    MaxOverflow(usize),
     IO(String),
 }
 
@@ -18,8 +19,11 @@ impl fmt::Debug for Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let reason = match self {
-            Error::InvalidAlgorithm => "choices are sieve & naive",
-            Error::IO(s) => s,
+            Error::InvalidAlgorithm => String::from("choices are sieve & naive"),
+            Error::IO(s) => s.to_owned(),
+            Error::MaxOverflow(n) => {
+                format!("<max> must be less than {} on this platform", n - 1)
+            },
         };
         write!(f, "{}", reason)
     }
