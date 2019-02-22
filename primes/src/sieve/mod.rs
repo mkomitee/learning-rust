@@ -27,7 +27,7 @@ impl Iterator for Primes {
                 let mut current = n + n;
                 while current <= self.max {
                     self.eliminated[current as usize] = true;
-                    current = current + n;
+                    current += n;
                 }
                 self.next = n + 1;
                 return Some(n);
