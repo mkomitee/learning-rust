@@ -3,17 +3,21 @@ mod naive;
 mod options;
 mod sieve;
 
+use crate::{
+    errors::Error,
+    options::{Algorithm, Opt},
+};
 use std::io::{self, BufWriter, Write};
 use structopt::StructOpt;
 
 // By having main return a result, we can have it exit non-zero and print an error when we
 // experience an error by using the ? operator.
-fn main() -> Result<(), errors::Error> {
-    let opt = options::Opt::from_args();
+fn main() -> Result<(), Error> {
+    let opt = Opt::from_args();
 
     let primes = match opt.algorithm {
-        options::Algorithm::Naive => naive::primes(opt.max),
-        options::Algorithm::Sieve => sieve::primes(opt.max),
+        Algorithm::Naive => naive::primes(opt.max),
+        Algorithm::Sieve => sieve::primes(opt.max),
     };
 
     // By locking stdout ourselves & using writeln! instead of println!, we avoid having to

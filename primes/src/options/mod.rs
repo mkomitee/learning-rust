@@ -1,4 +1,4 @@
-use crate::errors;
+use crate::errors::Error;
 use std::str::FromStr;
 use structopt::StructOpt;
 
@@ -9,12 +9,12 @@ pub enum Algorithm {
 }
 
 impl FromStr for Algorithm {
-    type Err = errors::Error;
+    type Err = Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "sieve" => Ok(Algorithm::Sieve),
             "naive" => Ok(Algorithm::Naive),
-            _ => Err(errors::Error::InvalidAlgorithm),
+            _ => Err(Error::InvalidAlgorithm),
         }
     }
 }
