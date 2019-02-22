@@ -21,7 +21,7 @@ fn main() -> Result<(), Error> {
             // Sieve allocates a vector sized at opt.max + 1. This limits us to addressable memory
             // on the system based on the size of usize.
             if opt.max > (std::usize::MAX - 1) as u64 {
-                return Err(Error::MaxOverflow(std::usize::MAX - 1));
+                return Err(Error::MaxOverflow((std::usize::MAX - 1) as u64));
             }
             sieve::primes(opt.max)
         },

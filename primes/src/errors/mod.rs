@@ -2,7 +2,7 @@ use std::{fmt, io};
 
 pub enum Error {
     InvalidAlgorithm,
-    MaxOverflow(usize),
+    MaxOverflow(u64),
     IO(String),
 }
 
