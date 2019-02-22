@@ -1,4 +1,4 @@
-use std::{fmt, io, string};
+use std::{fmt, io};
 
 pub enum Error {
     InvalidAlgorithm,
@@ -7,15 +7,15 @@ pub enum Error {
 
 // Required to have structop parse our Algorithm & display an error if the provided option
 // isn't valid.
-impl string::ToString for Error {
-    fn to_string(&self) -> String {
-        return format!("{:?}", self);
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self)
     }
 }
 
 // Required to display errors automatically when returned in a Result from main. We could
 // derive it, but this allows us to format it how we want.
-impl fmt::Debug for Error {
+impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let reason = match self {
             Error::InvalidAlgorithm => "choices are sieve & naive",
