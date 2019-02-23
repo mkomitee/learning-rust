@@ -7,3 +7,4 @@ description = "Calculate primes with multiple algorithms."
 
 [dependencies]
 structopt = "0.2"
+failure = "0.1.5"
