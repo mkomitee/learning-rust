@@ -1,3 +1,16 @@
+// Globi::<!>Today at 11:03 AM
+// something like
+// trait LockWrite {
+//     type Locked: Write;
+
+//     fn lock(self) -> Self::Locked;
+// }
+// mkomiteeToday at 11:03 AM
+// Thanks. I'll give this a shot when I get a chance. I'll let you know how it goes.
+// Globi::<!>Today at 11:03 AM
+// and
+// fn write<T: LockWrite>(mut fhandle: T, messages: &[&[u8]])
+
 use os_pipe::{pipe, PipeReader};
 use std::borrow::ToOwned;
 use std::ffi::OsString;
@@ -65,12 +78,18 @@ impl From<Result<ExitStatus, io::Error>> for ProcessExitResult {
     }
 }
 
+// This abomination exists solely because I can't figure out how to write a function generic over
+// stdout & stderr which doesn't at the same time lose the ability to lock them for multiple
+// writes.
 #[derive(Clone)]
 enum StdIOTarget {
     Stdout,
     Stderr,
 }
 
+// Note, by handing everything off to our io threads, we're avoiding having to lock/unlock
+// stdout/stderr over and over, but at the cost of a whole lot of extra cloning. That's probably? a
+// bad trade-off.
 fn stream_output(
     target: StdIOTarget,
     reader: PipeReader,
@@ -88,8 +107,11 @@ fn stream_output(
             }
             //  Otherwise ...
             Ok(_) => {
-                tx.send((target.clone(), prefix.clone(), buf.clone()))
-                    .unwrap();
+                if let Err(_) = tx.send((target.clone(), prefix.clone(), buf.clone())) {
+                    // Receiver is gone we've got a logic error somewhere, no sense continuing.
+                    // Commands Writing to the pipe should receive EPIPE as our reader is dropped.
+                    return;
+                }
                 buf.clear();
             }
         }
