@@ -31,25 +31,30 @@ struct Opt {
     concurrency: isize,
 }
 
-enum ProcessResult {
+enum ProcessExitResult {
     IOError(io::Error),
     Code(i32),
     Signal(i32),
 }
 
-impl From<Result<ExitStatus, io::Error>> for ProcessResult {
+struct ProcessResult {
+    cwd: OsString,
+    exit: ProcessExitResult,
+}
+
+impl From<Result<ExitStatus, io::Error>> for ProcessExitResult {
     fn from(result: Result<ExitStatus, io::Error>) -> Self {
         match result {
-            Err(err) => ProcessResult::IOError(err),
+            Err(err) => ProcessExitResult::IOError(err),
             Ok(estatus) => {
                 if let Some(code) = estatus.code() {
-                    ProcessResult::Code(code)
+                    ProcessExitResult::Code(code)
                 } else {
                     // We expect here because we know that the command executed (no Err), that it
                     // finished (or there would be no ExitStatus) and that it didn't exit with an
                     // exit code (estatus.code() -> None). While the compiler can't prove it,
                     // there's no other possibility.
-                    ProcessResult::Signal(
+                    ProcessExitResult::Signal(
                         estatus
                             .signal()
                             .expect("process exited with no exit code or signal!"),
@@ -133,22 +138,23 @@ fn main() {
         handle_io(rx_io);
     });
 
+    // Processing our results at the end ...
+    let mut results = Vec::new();
+    let (tx_res, rx_res) = channel::<ProcessResult>();
+
     // We limit concurrency with a semaphore ...
     let semaphore = Arc::new(Semaphore::new(opt.concurrency));
 
     // Track our threads so we can ensure they complete ...
     let mut cwd_threads = Vec::new();
 
-    // TODO: Don't print out resulting signal / exit code / error until end.
-    // TODO: Exit with appropriate exit code
     for cwd in opt.directory {
         let exec = exec.clone();
         let args = args.clone();
         let semaphore = semaphore.clone();
         let tx_io = tx_io.clone();
+        let tx_res = tx_res.clone();
         cwd_threads.push(thread::spawn(move || {
-            // let mut e_code = 0;
-
             // Acquire our guard to limit concurrency
             let _guard = semaphore.access();
 
@@ -158,8 +164,12 @@ fn main() {
                 // Couldn't create our pipes. I suspect a ulimit issue, but there's nothing we can
                 // do but note the failure and return.
                 Err(err) => {
-                    print_error(tx_io, cwd, format!("{:}\n", err));
-                    // e_code = 1;
+                    tx_res
+                        .send(ProcessResult {
+                            cwd: cwd,
+                            exit: ProcessExitResult::IOError(err),
+                        })
+                        .unwrap();
                     return;
                 }
             };
@@ -168,8 +178,12 @@ fn main() {
                 // Couldn't create our pipes. I suspect a ulimit issue, but there's nothing we can
                 // do but note the failure and return.
                 Err(err) => {
-                    print_error(tx_io, cwd, format!("{:}\n", err));
-                    // e_code = 1;
+                    tx_res
+                        .send(ProcessResult {
+                            cwd: cwd,
+                            exit: ProcessExitResult::IOError(err),
+                        })
+                        .unwrap();
                     return;
                 }
             };
@@ -186,8 +200,12 @@ fn main() {
                 Ok(child) => child,
                 // The child couldn't spawn, nothing left to do but note the failure and return.
                 Err(err) => {
-                    print_error(tx_io, cwd, format!("{:}\n", err));
-                    // e_code = 1;
+                    tx_res
+                        .send(ProcessResult {
+                            cwd: cwd,
+                            exit: ProcessExitResult::IOError(err),
+                        })
+                        .unwrap();
                     return;
                 }
             };
@@ -212,7 +230,7 @@ fn main() {
             }
 
             // Wait for the child to finish ...
-            let result: ProcessResult = child.wait().into();
+            let result: ProcessExitResult = child.wait().into();
 
             // Drop the child since it owns the write side of our pipes, and it needs to be dropped
             // to close them so our io threads can get an EOF. This is what the docs say to do so
@@ -227,37 +245,47 @@ fn main() {
                 t.join().unwrap();
             }
 
-            // Handle the results.
-            match result {
-                ProcessResult::Code(0) => {}
-                ProcessResult::Code(code) => {
-                    print_error(tx_io, cwd, format!("exited {:}\n", code));
-                    // e_code = 1;
-                }
-                ProcessResult::Signal(signal) => {
-                    print_error(tx_io, cwd, format!("signaled {:}\n", signal));
-                    // e_code = 1;
-                }
-                ProcessResult::IOError(err) => {
-                    print_error(tx_io, cwd, format!("{:}\n", err));
-                    // e_code = 1;
-                }
-            };
+            tx_res
+                .send(ProcessResult {
+                    cwd: cwd,
+                    exit: result,
+                })
+                .unwrap();
         }));
     }
-
-    // Close our io thread sender so it can finish up ...
-    drop(tx_io);
 
     // Join our cwd threads.
     for t in cwd_threads {
         // We unwrap because frankly, I don't know what to do if one of our threads panics, so we
         // may as well panic too.
         t.join().unwrap();
+        results.push(rx_res.recv().unwrap());
     }
 
+    let mut e_code = 0;
+    for result in results {
+        // Handle the results.
+        let tx_io = tx_io.clone();
+        match result.exit {
+            ProcessExitResult::Code(0) => {}
+            ProcessExitResult::Code(code) => {
+                print_error(tx_io, result.cwd, format!("exited {:}\n", code));
+                e_code = 1;
+            }
+            ProcessExitResult::Signal(signal) => {
+                print_error(tx_io, result.cwd, format!("signaled {:}\n", signal));
+                e_code = 1;
+            }
+            ProcessExitResult::IOError(err) => {
+                print_error(tx_io, result.cwd, format!("{:}\n", err));
+                e_code = 1;
+            }
+        };
+    }
+
+    // Close our io thread sender so it can finish up ...
+    drop(tx_io);
     io_thread.join().unwrap();
 
-    let e_code = 0;
     exit(e_code);
 }

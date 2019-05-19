@@ -6,3 +6,4 @@ for i in $(seq $1); do
     echo > /dev/stderr
     sleep 0.1
 done
+exit $2
