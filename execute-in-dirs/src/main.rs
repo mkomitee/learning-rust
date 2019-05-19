@@ -1,9 +1,11 @@
+use os_pipe::{pipe, PipeReader};
 use std::ffi::OsString;
-use std::io;
+use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
-use std::path::PathBuf;
-use std::process::{exit, Command, ExitStatus, Stdio};
+use std::process::{exit, Command, ExitStatus};
 use std::result::Result;
+use std::thread;
 use structopt;
 use structopt::StructOpt;
 
@@ -14,9 +16,9 @@ use structopt::StructOpt;
 )]
 struct Opt {
     /// Directories in which to execute command
-    // PathBuf because filenames are not guaranteed to be utf8.
+    // OsString because filenames are not guaranteed to be utf8.
     #[structopt(parse(from_os_str), raw(required = "true"))]
-    directory: Vec<PathBuf>,
+    directory: Vec<OsString>,
     /// Command to execute
     // OsString because files & arguments are not guaranteed to be utf8.
     #[structopt(parse(from_os_str), raw(last = "true", required = "true"))]
@@ -37,10 +39,10 @@ impl From<Result<ExitStatus, io::Error>> for ProcessResult {
                 if let Some(code) = estatus.code() {
                     ProcessResult::Code(code)
                 } else {
-                    // I expect here because I know that the command executed (no Err), that it
-                    // finished (or we'd have no ExitStatus) and that it didn't exit with an exit
-                    // code (estatus.code() -> None). While the compiler can't prove it, there's no
-                    // other possibility.
+                    // We expect here because we know that the command executed (no Err), that it
+                    // finished (or there would be no ExitStatus) and that it didn't exit with an
+                    // exit code (estatus.code() -> None). While the compiler can't prove it,
+                    // there's no other possibility.
                     ProcessResult::Signal(
                         estatus
                             .signal()
@@ -52,80 +54,156 @@ impl From<Result<ExitStatus, io::Error>> for ProcessResult {
     }
 }
 
-fn main() {
-    let opt = Opt::from_args();
-    let mut ecode = 0;
-    if let Some((exec, args)) = opt.arg.split_first() {
-        // TODO: run the commands concurrently with a max concurrency using threads.
-        for cwd in opt.directory {
-            let child = Command::new(exec)
-                .args(args)
-                .current_dir(&cwd)
-                .stdout(Stdio::piped())
-                // .stderr(Stdio::piped()) // TODO: handle stderr too, once I figure out how ...
-                .spawn();
+enum StdIOTarget {
+    Stdout,
+    Stderr,
+}
 
-            // For now, I'm using eprintln! to print these, and PathBuf's don't implement Display,
-            // so I convert them to String's for the sole purpose of display. At some point I may
-            // chose to drop this and write bytes directly to my stderr, but this is probably good
-            // enough.
-            let cwd = cwd.to_string_lossy();
-            let cwd = cwd.trim_end_matches('/');
-
-            if let Err(err) = child {
-                eprintln!("{:}: {:}", cwd, err);
-                ecode = 1;
-                continue;
+fn stream_output(target: &StdIOTarget, reader: PipeReader, prefix: &[u8]) {
+    let mut reader = BufReader::new(reader);
+    let mut buf = Vec::new();
+    loop {
+        let result = reader.read_until(b'\n', &mut buf);
+        match result {
+            // If we got 0 bytes or an error, we're done. Return.
+            Err(_) | Ok(0) => {
+                return;
             }
-
-            // I expect here because I've already verified child.is_ok() with the previous if let,
-            // and if it was err, we'd have continued our loop. I chose to do it this way to avoid
-            // another level of indentation.
-            let mut child = child.unwrap();
-
-            // XXX: I want to stream stdout/stderr to the console on the appropriate file
-            // descriptors, and I know I'm going to have to use epoll directly, figure out
-            // async/futures, or potentially use threads, but the first thing I need to do is
-            // figure out how to get access to the Child's stdout pipe.
-            //
-            // I wonder if I'll need to use something like https://docs.rs/os_pipe/0.8.1/os_pipe/
-            // to create my own pipes and hand them to the Command instead of using Stdio::piped()
-            // which causes me to have to access the pipe by partially moving out from the Child.
-            //
-            // In any event, I can't figure out how to effectively do what I'm trying to do in the
-            // next line without partially moving Child when accessing/unwrapping child.stdout,
-            // which makes it so I cannot call wait() on the child later-on.
-            // The error I get when I compile with the following line is:
-            //
-            // error[E0382]: borrow of moved value: `child`
-            //    --> src/main.rs:90:41
-            //     |
-            // 110 |             let _stdout = child.stdout.expect("stdout missing?");
-            //     |                           ------------ value moved here
-            // 111 |
-            // 112 |             let result: ProcessResult = child.wait().into();
-            //     |                                         ^^^^^ value borrowed here after partial move
-            //     |
-            //     = note: move occurs because `child.stdout` has type `std::option::Option<std::process::ChildStdout>`, which does not implement the `Copy` trait
-            let stdout = child.stdout.expect("stdout missing?");
-
-            let result: ProcessResult = child.wait().into();
-            match result {
-                ProcessResult::Code(0) => eprintln!("{:}: ok", cwd),
-                ProcessResult::Code(code) => {
-                    eprintln!("{:}: exited {:}", cwd, code);
-                    ecode = 1;
+            //  Otherwise ...
+            Ok(_) => {
+                // I can't figure out how to get this to be more generic over both stdout & stderr,
+                // so instead we have code duplication.
+                match target {
+                    StdIOTarget::Stdout => {
+                        // We're printing a full line, so we need to acquire a lock for the
+                        // duration ...
+                        let stdout = io::stdout();
+                        let mut stdout = stdout.lock();
+                        for token in &[prefix, b": ", &buf] {
+                            if stdout.write(token).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    StdIOTarget::Stderr => {
+                        // We're printing a full line, so we need to acquire a lock for the
+                        // duration ...
+                        let stderr = io::stderr();
+                        let mut stderr = stderr.lock();
+                        for token in &[prefix, b": ", &buf] {
+                            if stderr.write(token).is_err() {
+                                return;
+                            }
+                        }
+                    }
                 }
-                ProcessResult::Signal(signal) => {
-                    eprintln!("{:}: signaled {:}", cwd, signal);
-                    ecode = 1;
-                }
-                ProcessResult::IOError(err) => {
-                    eprintln!("{:}: {:}", cwd, err);
-                    ecode = 1;
-                }
-            };
+                buf.clear();
+            }
         }
     }
-    exit(ecode);
+}
+
+fn print_error(prefix: &[u8], message: String) {
+    let stderr = io::stderr();
+    let mut stderr = stderr.lock();
+    for token in &[prefix, b": ", &message.into_bytes()] {
+        if stderr.write(token).is_err() {
+            // Well, we can't print to stderr, so there's not much else we can do here short of
+            // crashing the program --- maybe we should do that instead of ignoring this?
+            return;
+        }
+    }
+}
+
+fn main() {
+    let opt = Opt::from_args();
+    let mut e_code = 0;
+
+    // We expect here because we know structopt will ensure that opt.arg has at least one element,
+    // so we won't have a None.
+    let (exec, args) = opt.arg.split_first().expect("structopt lied?");
+
+    // TODO: run the commands concurrently with a max concurrency using threads.
+    for cwd in opt.directory {
+        // Setup our pipes for the command ...
+        let (o_reader, o_writer) = match pipe() {
+            Ok((o_reader, o_writer)) => (o_reader, o_writer),
+            Err(err) => {
+                print_error(cwd.as_bytes(), format!("{:}\n", err));
+                e_code = 1;
+                continue;
+            }
+        };
+        let (e_reader, e_writer) = match pipe() {
+            Ok((e_reader, e_writer)) => (e_reader, e_writer),
+            Err(err) => {
+                print_error(cwd.as_bytes(), format!("{:}\n", err));
+                e_code = 1;
+                continue;
+            }
+        };
+
+        // Spawn our command ...
+        let child = Command::new(exec)
+            .args(args)
+            .current_dir(&cwd)
+            .stdout(o_writer)
+            .stderr(e_writer)
+            .spawn();
+
+        // We're going to write directly to stdout/stderr instead of using println or eprintln
+        // because we want to prefix e very line with the cwd we're using and the cwd's are
+        // OsStrings because they're not limited to utf8 characters. As such, we need bytes for
+        // writing.
+        let cwd = cwd.as_bytes().to_owned();
+
+        let mut child = match child {
+            Ok(child) => child,
+            Err(err) => {
+                print_error(&cwd, format!("{:}\n", err));
+                e_code = 1;
+                continue;
+            }
+        };
+
+        // We're spawning threads to process stdout/stderr from our commands. Track them to join.
+        let mut io_threads = Vec::new();
+        for (target, reader) in vec![
+            (StdIOTarget::Stdout, o_reader),
+            (StdIOTarget::Stderr, e_reader),
+        ] {
+            // Clone since we're moving into a thread closure ...
+            let cwd = cwd.clone();
+            io_threads.push(thread::spawn(move || {
+                stream_output(&target, reader, &cwd);
+            }));
+        }
+
+        // Wait for the child to finish ...
+        let result: ProcessResult = child.wait().into();
+
+        for t in io_threads {
+            // We unwrap because frankly, I don't know what to do if one of our threads panics, so
+            // we may as well panic too.
+            //
+            t.join().unwrap();
+        }
+
+        match result {
+            ProcessResult::Code(0) => {}
+            ProcessResult::Code(code) => {
+                print_error(&cwd, format!("exited {:}\n", code));
+                e_code = 1;
+            }
+            ProcessResult::Signal(signal) => {
+                print_error(&cwd, format!("signaled {:}\n", signal));
+                e_code = 1;
+            }
+            ProcessResult::IOError(err) => {
+                print_error(&cwd, format!("{:}\n", err));
+                e_code = 1;
+            }
+        };
+    }
+    exit(e_code);
 }
