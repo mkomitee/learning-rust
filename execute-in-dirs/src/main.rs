@@ -70,7 +70,6 @@ impl From<Result<ExitStatus, io::Error>> for ProcessExitResult {
 // This abomination exists solely because I can't figure out how to write a function generic over
 // stdout & stderr which doesn't at the same time lose the ability to lock them for multiple
 // writes.
-#[derive(Clone)]
 enum IOHandle {
     Output,
     Error,
@@ -118,7 +117,7 @@ fn main() {
 
     // Processing our results at the end ...
     let mut results = Vec::new();
-    let (tx, rx) = channel::<ProcessResult>();
+    let (tx, rx) = channel();
 
     // We limit concurrency with a semaphore ...
     let semaphore = Arc::new(Semaphore::new(opt.concurrency));
