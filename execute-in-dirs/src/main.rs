@@ -1,6 +1,6 @@
 use os_pipe::{pipe, PipeReader};
 use std::borrow::ToOwned;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
@@ -69,15 +69,12 @@ impl From<Result<ExitStatus, io::Error>> for ProcessExitResult {
 // stdout & stderr which doesn't at the same time lose the ability to lock them for multiple
 // writes.
 #[derive(Clone)]
-enum StdIOTarget {
-    Stdout,
-    Stderr,
+enum IOHandle {
+    Output,
+    Error,
 }
 
-// Note, by handing everything off to our io threads, we're avoiding having to lock/unlock
-// stdout/stderr over and over, but at the cost of a whole lot of extra cloning. That's probably? a
-// bad trade-off.
-fn stream_output(target: &StdIOTarget, reader: PipeReader, prefix: &OsString) {
+fn stream_output(target: &IOHandle, reader: PipeReader, prefix: &OsStr) {
     let stdout = io::stdout();
     let stderr = io::stderr();
     let mut reader = BufReader::new(reader);
@@ -92,8 +89,8 @@ fn stream_output(target: &StdIOTarget, reader: PipeReader, prefix: &OsString) {
             //  Otherwise ...
             Ok(_) => {
                 match target {
-                    StdIOTarget::Stdout => write_with_prefix(stdout.lock(), prefix, &buf),
-                    StdIOTarget::Stderr => write_with_prefix(stderr.lock(), prefix, &buf),
+                    IOHandle::Output => write_with_prefix(stdout.lock(), prefix, &buf),
+                    IOHandle::Error => write_with_prefix(stderr.lock(), prefix, &buf),
                 }
                 buf.clear();
             }
@@ -101,8 +98,10 @@ fn stream_output(target: &StdIOTarget, reader: PipeReader, prefix: &OsString) {
     }
 }
 
-fn write_with_prefix<T: Write>(mut handle: T, prefix: &OsString, message: &[u8]) {
+fn write_with_prefix<T: Write>(mut handle: T, prefix: &OsStr, message: &[u8]) {
     for token in &[prefix.as_bytes(), b": ", message] {
+        // If we can't write (e.g. the reader has closed it's end of the pipe) ignore the error and
+        // continue to run.
         let _ = handle.write(token);
     }
 }
@@ -144,7 +143,9 @@ fn main() {
                         exit: ProcessExitResult::IOError(err),
                         cwd,
                     })
-                    .unwrap();
+                    // We expect because we know the receiver has not been dropped, and that's the
+                    // only thing that could cause an error.
+                    .expect("result rx expectedly dropped");
                     return;
                 }
             };
@@ -157,7 +158,9 @@ fn main() {
                         exit: ProcessExitResult::IOError(err),
                         cwd,
                     })
-                    .unwrap();
+                    // We expect because we know the receiver has not been dropped, and that's the
+                    // only thing that could cause an error.
+                    .expect("result rx unexpectedly dropped");
                     return;
                 }
             };
@@ -178,7 +181,9 @@ fn main() {
                         exit: ProcessExitResult::IOError(err),
                         cwd,
                     })
-                    .unwrap();
+                    // We expect because we know the receiver has not been dropped, and that's the
+                    // only thing that could cause an error.
+                    .expect("result rx unexpectedly dropped");
                     return;
                 }
             };
@@ -187,31 +192,17 @@ fn main() {
             // join.
             let mut io_threads = Vec::new();
 
-            // This feels stupid, but I can't figure out how to pass the actual stdout / stderr to
-            // the same function -- using a Box<dyn Write> works but we lose the ability to lock
-            // it.
-            for (target, reader) in vec![
-                (StdIOTarget::Stdout, o_reader),
-                (StdIOTarget::Stderr, e_reader),
-            ] {
+            // This feels silly, but apparently we can't write a simple generic function which can
+            // take both io::stdout & io::stderr without losing the ability to lock them without
+            // generic associated types because io::Std{out,err}.lock()'s are borrows.
+            for (target, reader) in vec![(IOHandle::Output, o_reader), (IOHandle::Error, e_reader)]
+            {
                 // Clone since we're moving into a thread closure ...
                 let cwd = cwd.clone();
                 io_threads.push(thread::spawn(move || {
                     stream_output(&target, reader, &cwd);
                 }));
             }
-            // {
-            //     let cwd = cwd.clone();
-            //     io_threads.push(thread::spawn(move || {
-            //         stream_output(io::stdout(), o_reader, cwd);
-            //     }));
-            // }
-            // {
-            //     let cwd = cwd.clone();
-            //     io_threads.push(thread::spawn(move || {
-            //         stream_output(io::stderr(), e_reader, cwd);
-            //     }));
-            // }
 
             // Wait for the child to finish ...
             let result: ProcessExitResult = child.wait().into();
@@ -222,23 +213,29 @@ fn main() {
             // happen.
             drop(child);
 
-            // Join our io threads.
-            for t in io_threads {
-                // We unwrap because frankly, I don't know what to do if one of our threads panics,
-                // so we may as well panic too.
-                t.join().unwrap();
+            // Join our io threads so that we block until all of our commands output has been
+            // handled.
+            for thread in io_threads {
+                thread.join().expect("io thread paniced");
             }
 
-            tx.send(ProcessResult { exit: result, cwd }).unwrap();
+            tx.send(ProcessResult { exit: result, cwd })
+                // We expect because we know the receiver has not been dropped, and that's the only
+                // thing that could cause an error.
+                .expect("result rx unexpectedly dropped");
         }));
     }
 
     // Join our cwd threads.
-    for t in cmd_threads {
-        // We unwrap because frankly, I don't know what to do if one of our threads panics, so we
-        // may as well panic too.
-        t.join().unwrap();
-        results.push(rx.recv().unwrap());
+    for thread in cmd_threads {
+        if let Ok(()) = thread.join() {
+            results.push(
+                rx.recv()
+                    // We expect because we know that we'll have at least one result per cmd thread
+                    // we were able to join.
+                    .expect("all tx threads dropped with buffered message"),
+            );
+        }
     }
 
     let mut e_code = 0;
