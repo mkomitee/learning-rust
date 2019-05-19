@@ -1,8 +1,11 @@
+use std::borrow::Borrow;
 use std::ffi::OsString;
 use std::io;
+use std::io::BufReader;
+use std::io::Read;
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
-use std::process::{exit, Command, ExitStatus};
+use std::process::{exit, Command, ExitStatus, Stdio};
 use std::result::Result;
 use structopt;
 use structopt::StructOpt;
@@ -55,27 +58,41 @@ fn main() {
     if let Some((exec, args)) = opt.arg.split_first() {
         // TODO: run the commands concurrently with a max concurrency using threads.
         for cwd in opt.directory {
-            let result: ProcessResult = Command::new(exec)
+            let child = Command::new(exec)
                 .args(args)
                 .current_dir(&cwd)
-                .status()
-                .into();
-            // TODO: stream output to stdout/stderr, but prefixed with the cwd.
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
             let cwd = cwd.to_string_lossy();
             let cwd = cwd.trim_end_matches('/');
-            match result {
-                ProcessResult::Code(0) => eprintln!("{:}: ok", cwd),
-                ProcessResult::Code(code) => {
-                    eprintln!("{:}: exited {:}", cwd, code);
-                    ecode = 1;
-                }
-                ProcessResult::Signal(signal) => {
-                    eprintln!("{:}: signaled {:}", cwd, signal);
-                    ecode = 1;
-                }
-                ProcessResult::IOError(err) => {
+            match child {
+                Err(err) => {
                     eprintln!("{:}: {:}", cwd, err);
                     ecode = 1;
+                    continue;
+                }
+
+                Ok(mut child) => {
+                    // TODO: stream output to stdout/stderr, but prefixed with the cwd.
+                    let _stdout = BufReader::new(child.stdout.expect("stdout missing?"));
+                    let _stderr = BufReader::new(child.stderr.expect("stderr missing?"));
+                    let result: ProcessResult = child.wait().into();
+                    match result {
+                        ProcessResult::Code(0) => eprintln!("{:}: ok", cwd),
+                        ProcessResult::Code(code) => {
+                            eprintln!("{:}: exited {:}", cwd, code);
+                            ecode = 1;
+                        }
+                        ProcessResult::Signal(signal) => {
+                            eprintln!("{:}: signaled {:}", cwd, signal);
+                            ecode = 1;
+                        }
+                        ProcessResult::IOError(err) => {
+                            eprintln!("{:}: {:}", cwd, err);
+                            ecode = 1;
+                        }
+                    };
                 }
             };
         }
