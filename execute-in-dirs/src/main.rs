@@ -6,6 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{exit, Command, ExitStatus};
 use std::result::Result;
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 use std_semaphore::Semaphore;
@@ -59,12 +60,18 @@ impl From<Result<ExitStatus, io::Error>> for ProcessResult {
     }
 }
 
+#[derive(Clone)]
 enum StdIOTarget {
     Stdout,
     Stderr,
 }
 
-fn stream_output(target: &StdIOTarget, reader: PipeReader, prefix: &[u8]) {
+fn stream_output(
+    target: StdIOTarget,
+    reader: PipeReader,
+    prefix: OsString,
+    tx: Sender<(StdIOTarget, OsString, Vec<u8>)>,
+) {
     let mut reader = BufReader::new(reader);
     let mut buf = Vec::new();
     loop {
@@ -76,46 +83,38 @@ fn stream_output(target: &StdIOTarget, reader: PipeReader, prefix: &[u8]) {
             }
             //  Otherwise ...
             Ok(_) => {
-                // I can't figure out how to get this to be more generic over both stdout & stderr,
-                // so instead we have code duplication.
-                match target {
-                    StdIOTarget::Stdout => {
-                        // We're printing a full line, so we need to acquire a lock for the
-                        // duration ...
-                        let stdout = io::stdout();
-                        let mut stdout = stdout.lock();
-                        for token in &[prefix, b": ", &buf] {
-                            if stdout.write(token).is_err() {
-                                return;
-                            }
-                        }
-                    }
-                    StdIOTarget::Stderr => {
-                        // We're printing a full line, so we need to acquire a lock for the
-                        // duration ...
-                        let stderr = io::stderr();
-                        let mut stderr = stderr.lock();
-                        for token in &[prefix, b": ", &buf] {
-                            if stderr.write(token).is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
+                tx.send((target.clone(), prefix.clone(), buf.clone()))
+                    .unwrap();
                 buf.clear();
             }
         }
     }
 }
 
-fn print_error(prefix: &[u8], message: String) {
+fn print_error(tx: Sender<(StdIOTarget, OsString, Vec<u8>)>, prefix: OsString, message: String) {
+    tx.send((StdIOTarget::Stderr, prefix, message.as_bytes().to_vec()))
+        .unwrap();
+}
+
+fn handle_io(rx: Receiver<(StdIOTarget, OsString, Vec<u8>)>) {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
     let stderr = io::stderr();
     let mut stderr = stderr.lock();
-    for token in &[prefix, b": ", &message.into_bytes()] {
-        if stderr.write(token).is_err() {
-            // Well, we can't print to stderr, so there's not much else we can do here short of
-            // crashing the program --- maybe we should do that instead of ignoring this?
-            return;
+    loop {
+        match rx.recv() {
+            Ok((StdIOTarget::Stdout, prefix, message)) => {
+                for token in &[prefix.as_bytes(), b": ", &message] {
+                    let _ = stdout.write(token);
+                }
+            }
+            Ok((StdIOTarget::Stderr, prefix, message)) => {
+                for token in &[prefix.as_bytes(), b": ", &message] {
+                    let _ = stderr.write(token);
+                }
+            }
+            // No live senders, we're done!
+            Err(_) => break,
         }
     }
 }
@@ -127,6 +126,12 @@ fn main() {
     // We need to split argv0 from the rest for Command ...
     let exec = opt.arg[0].to_owned();
     let args: Vec<OsString> = opt.arg.iter().skip(1).map(ToOwned::to_owned).collect();
+
+    // Start up our IO handling thread.
+    let (tx_io, rx_io) = channel::<(StdIOTarget, OsString, Vec<u8>)>();
+    let io_thread = thread::spawn(move || {
+        handle_io(rx_io);
+    });
 
     // We limit concurrency with a semaphore ...
     let semaphore = Arc::new(Semaphore::new(opt.concurrency));
@@ -140,6 +145,7 @@ fn main() {
         let exec = exec.clone();
         let args = args.clone();
         let semaphore = semaphore.clone();
+        let tx_io = tx_io.clone();
         cwd_threads.push(thread::spawn(move || {
             // let mut e_code = 0;
 
@@ -152,7 +158,7 @@ fn main() {
                 // Couldn't create our pipes. I suspect a ulimit issue, but there's nothing we can
                 // do but note the failure and return.
                 Err(err) => {
-                    print_error(cwd.as_bytes(), format!("{:}\n", err));
+                    print_error(tx_io, cwd, format!("{:}\n", err));
                     // e_code = 1;
                     return;
                 }
@@ -162,7 +168,7 @@ fn main() {
                 // Couldn't create our pipes. I suspect a ulimit issue, but there's nothing we can
                 // do but note the failure and return.
                 Err(err) => {
-                    print_error(cwd.as_bytes(), format!("{:}\n", err));
+                    print_error(tx_io, cwd, format!("{:}\n", err));
                     // e_code = 1;
                     return;
                 }
@@ -176,17 +182,11 @@ fn main() {
                 .stderr(e_writer)
                 .spawn();
 
-            // We're going to write directly to stdout/stderr instead of using println or eprintln
-            // because we want to prefix very line with the cwd we're using and the cwd's are
-            // OsStrings because they're not limited to utf8 characters. As such, we need bytes for
-            // writing.
-            let cwd = cwd.as_bytes().to_owned();
-
             let mut child = match child {
                 Ok(child) => child,
                 // The child couldn't spawn, nothing left to do but note the failure and return.
                 Err(err) => {
-                    print_error(&cwd, format!("{:}\n", err));
+                    print_error(tx_io, cwd, format!("{:}\n", err));
                     // e_code = 1;
                     return;
                 }
@@ -205,8 +205,9 @@ fn main() {
             ] {
                 // Clone since we're moving into a thread closure ...
                 let cwd = cwd.clone();
+                let tx = tx_io.clone();
                 io_threads.push(thread::spawn(move || {
-                    stream_output(&target, reader, &cwd);
+                    stream_output(target, reader, cwd, tx);
                 }));
             }
 
@@ -230,20 +231,23 @@ fn main() {
             match result {
                 ProcessResult::Code(0) => {}
                 ProcessResult::Code(code) => {
-                    print_error(&cwd, format!("exited {:}\n", code));
+                    print_error(tx_io, cwd, format!("exited {:}\n", code));
                     // e_code = 1;
                 }
                 ProcessResult::Signal(signal) => {
-                    print_error(&cwd, format!("signaled {:}\n", signal));
+                    print_error(tx_io, cwd, format!("signaled {:}\n", signal));
                     // e_code = 1;
                 }
                 ProcessResult::IOError(err) => {
-                    print_error(&cwd, format!("{:}\n", err));
+                    print_error(tx_io, cwd, format!("{:}\n", err));
                     // e_code = 1;
                 }
             };
         }));
     }
+
+    // Close our io thread sender so it can finish up ...
+    drop(tx_io);
 
     // Join our cwd threads.
     for t in cwd_threads {
@@ -251,6 +255,8 @@ fn main() {
         // may as well panic too.
         t.join().unwrap();
     }
+
+    io_thread.join().unwrap();
 
     let e_code = 0;
     exit(e_code);
