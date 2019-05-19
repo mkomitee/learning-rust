@@ -139,30 +139,30 @@ fn main() {
                 // Setup our pipes for the command
                 let (o_reader, o_writer) = match pipe() {
                     Ok((o_reader, o_writer)) => (o_reader, o_writer),
-                    // Couldn't create our pipes. I suspect a ulimit issue, but there's nothing we can
-                    // do but note the failure and return.
+                    // Couldn't create our pipes. I suspect a ulimit issue, but there's nothing we
+                    // can do but note the failure and return.
                     Err(err) => {
                         tx.send(ProcessResult {
                             exit: ProcessExitResult::IOError(err),
                             cwd,
                         })
-                        // We expect because we know the receiver has not been dropped, and that's the
-                        // only thing that could cause an error.
+                        // We expect because we know the receiver has not been dropped, and that's
+                        // the only thing that could cause an error.
                         .expect("result rx expectedly dropped");
                         return;
                     }
                 };
                 let (e_reader, e_writer) = match pipe() {
                     Ok((e_reader, e_writer)) => (e_reader, e_writer),
-                    // Couldn't create our pipes. I suspect a ulimit issue, but there's nothing we can
-                    // do but note the failure and return.
+                    // Couldn't create our pipes. I suspect a ulimit issue, but there's nothing we
+                    // can do but note the failure and return.
                     Err(err) => {
                         tx.send(ProcessResult {
                             exit: ProcessExitResult::IOError(err),
                             cwd,
                         })
-                        // We expect because we know the receiver has not been dropped, and that's the
-                        // only thing that could cause an error.
+                        // We expect because we know the receiver has not been dropped, and that's
+                        // the only thing that could cause an error.
                         .expect("result rx unexpectedly dropped");
                         return;
                     }
@@ -178,14 +178,15 @@ fn main() {
 
                 let mut child = match child {
                     Ok(child) => child,
-                    // The child couldn't spawn, nothing left to do but note the failure and return.
+                    // The child couldn't spawn, nothing left to do but note the failure and
+                    // return.
                     Err(err) => {
                         tx.send(ProcessResult {
                             exit: ProcessExitResult::IOError(err),
                             cwd,
                         })
-                        // We expect because we know the receiver has not been dropped, and that's the
-                        // only thing that could cause an error.
+                        // We expect because we know the receiver has not been dropped, and that's
+                        // the only thing that could cause an error.
                         .expect("result rx unexpectedly dropped");
                         return;
                     }
@@ -195,9 +196,9 @@ fn main() {
                 // join.
                 let mut io_threads = Vec::new();
 
-                // This feels silly, but apparently we can't write a simple generic function which can
-                // take both io::stdout & io::stderr without losing the ability to lock them without
-                // generic associated types because io::Std{out,err}.lock()'s are borrows.
+                // This feels silly, but apparently we can't write a simple generic function which
+                // can take both io::stdout & io::stderr without losing the ability to lock them
+                // without generic associated types because io::Std{out,err}.lock()'s are borrows.
                 for (target, reader) in
                     vec![(IOHandle::Output, o_reader), (IOHandle::Error, e_reader)]
                 {
@@ -211,10 +212,10 @@ fn main() {
                 // Wait for the child to finish ...
                 let result: ProcessExitResult = child.wait().into();
 
-                // Drop the child since it owns the write side of our pipes, and it needs to be dropped
-                // to close them so our io threads can get an EOF. This is what the docs say to do so
-                // I'm including it to be complete, but in practice, I've still never seen the EOF
-                // happen.
+                // Drop the child since it owns the write side of our pipes, and it needs to be
+                // dropped to close them so our io threads can get an EOF. This is what the docs
+                // say to do so I'm including it to be complete, but in practice, I've still never
+                // seen the EOF happen.
                 drop(child);
 
                 // Join our io threads so that we block until all of our commands output has been
@@ -224,8 +225,8 @@ fn main() {
                 }
 
                 tx.send(ProcessResult { exit: result, cwd })
-                    // We expect because we know the receiver has not been dropped, and that's the only
-                    // thing that could cause an error.
+                    // We expect because we know the receiver has not been dropped, and that's the
+                    // only thing that could cause an error.
                     .expect("result rx unexpectedly dropped");
             }),
         );
