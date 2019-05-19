@@ -1,16 +1,3 @@
-// Globi::<!>Today at 11:03 AM
-// something like
-// trait LockWrite {
-//     type Locked: Write;
-
-//     fn lock(self) -> Self::Locked;
-// }
-// mkomiteeToday at 11:03 AM
-// Thanks. I'll give this a shot when I get a chance. I'll let you know how it goes.
-// Globi::<!>Today at 11:03 AM
-// and
-// fn write<T: LockWrite>(mut fhandle: T, messages: &[&[u8]])
-
 use os_pipe::{pipe, PipeReader};
 use std::borrow::ToOwned;
 use std::ffi::OsString;
@@ -19,7 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{exit, Command, ExitStatus};
 use std::result::Result;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::thread;
 use std_semaphore::Semaphore;
@@ -90,12 +77,9 @@ enum StdIOTarget {
 // Note, by handing everything off to our io threads, we're avoiding having to lock/unlock
 // stdout/stderr over and over, but at the cost of a whole lot of extra cloning. That's probably? a
 // bad trade-off.
-fn stream_output(
-    target: StdIOTarget,
-    reader: PipeReader,
-    prefix: OsString,
-    tx: Sender<(StdIOTarget, OsString, Vec<u8>)>,
-) {
+fn stream_output(target: &StdIOTarget, reader: PipeReader, prefix: &OsString) {
+    let stdout = io::stdout();
+    let stderr = io::stderr();
     let mut reader = BufReader::new(reader);
     let mut buf = Vec::new();
     loop {
@@ -107,10 +91,9 @@ fn stream_output(
             }
             //  Otherwise ...
             Ok(_) => {
-                if let Err(_) = tx.send((target.clone(), prefix.clone(), buf.clone())) {
-                    // Receiver is gone we've got a logic error somewhere, no sense continuing.
-                    // Commands Writing to the pipe should receive EPIPE as our reader is dropped.
-                    return;
+                match target {
+                    StdIOTarget::Stdout => write_with_prefix(stdout.lock(), prefix, &buf),
+                    StdIOTarget::Stderr => write_with_prefix(stderr.lock(), prefix, &buf),
                 }
                 buf.clear();
             }
@@ -118,31 +101,9 @@ fn stream_output(
     }
 }
 
-fn print_error(tx: Sender<(StdIOTarget, OsString, Vec<u8>)>, prefix: OsString, message: String) {
-    tx.send((StdIOTarget::Stderr, prefix, message.as_bytes().to_vec()))
-        .unwrap();
-}
-
-fn handle_io(rx: Receiver<(StdIOTarget, OsString, Vec<u8>)>) {
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
-    let stderr = io::stderr();
-    let mut stderr = stderr.lock();
-    loop {
-        match rx.recv() {
-            Ok((StdIOTarget::Stdout, prefix, message)) => {
-                for token in &[prefix.as_bytes(), b": ", &message] {
-                    let _ = stdout.write(token);
-                }
-            }
-            Ok((StdIOTarget::Stderr, prefix, message)) => {
-                for token in &[prefix.as_bytes(), b": ", &message] {
-                    let _ = stderr.write(token);
-                }
-            }
-            // No live senders, we're done!
-            Err(_) => break,
-        }
+fn write_with_prefix<T: Write>(mut handle: T, prefix: &OsString, message: &[u8]) {
+    for token in &[prefix.as_bytes(), b": ", message] {
+        let _ = handle.write(token);
     }
 }
 
@@ -154,29 +115,22 @@ fn main() {
     let exec = opt.arg[0].to_owned();
     let args: Vec<OsString> = opt.arg.iter().skip(1).map(ToOwned::to_owned).collect();
 
-    // Start up our IO handling thread.
-    let (tx_io, rx_io) = channel::<(StdIOTarget, OsString, Vec<u8>)>();
-    let io_thread = thread::spawn(move || {
-        handle_io(rx_io);
-    });
-
     // Processing our results at the end ...
     let mut results = Vec::new();
-    let (tx_res, rx_res) = channel::<ProcessResult>();
+    let (tx, rx) = channel::<ProcessResult>();
 
     // We limit concurrency with a semaphore ...
     let semaphore = Arc::new(Semaphore::new(opt.concurrency));
 
     // Track our threads so we can ensure they complete ...
-    let mut cwd_threads = Vec::new();
+    let mut cmd_threads = Vec::new();
 
     for cwd in opt.directory {
         let exec = exec.clone();
         let args = args.clone();
         let semaphore = semaphore.clone();
-        let tx_io = tx_io.clone();
-        let tx_res = tx_res.clone();
-        cwd_threads.push(thread::spawn(move || {
+        let tx = tx.clone();
+        cmd_threads.push(thread::spawn(move || {
             // Acquire our guard to limit concurrency
             let _guard = semaphore.access();
 
@@ -186,12 +140,11 @@ fn main() {
                 // Couldn't create our pipes. I suspect a ulimit issue, but there's nothing we can
                 // do but note the failure and return.
                 Err(err) => {
-                    tx_res
-                        .send(ProcessResult {
-                            cwd: cwd,
-                            exit: ProcessExitResult::IOError(err),
-                        })
-                        .unwrap();
+                    tx.send(ProcessResult {
+                        exit: ProcessExitResult::IOError(err),
+                        cwd,
+                    })
+                    .unwrap();
                     return;
                 }
             };
@@ -200,12 +153,11 @@ fn main() {
                 // Couldn't create our pipes. I suspect a ulimit issue, but there's nothing we can
                 // do but note the failure and return.
                 Err(err) => {
-                    tx_res
-                        .send(ProcessResult {
-                            cwd: cwd,
-                            exit: ProcessExitResult::IOError(err),
-                        })
-                        .unwrap();
+                    tx.send(ProcessResult {
+                        exit: ProcessExitResult::IOError(err),
+                        cwd,
+                    })
+                    .unwrap();
                     return;
                 }
             };
@@ -222,12 +174,11 @@ fn main() {
                 Ok(child) => child,
                 // The child couldn't spawn, nothing left to do but note the failure and return.
                 Err(err) => {
-                    tx_res
-                        .send(ProcessResult {
-                            cwd: cwd,
-                            exit: ProcessExitResult::IOError(err),
-                        })
-                        .unwrap();
+                    tx.send(ProcessResult {
+                        exit: ProcessExitResult::IOError(err),
+                        cwd,
+                    })
+                    .unwrap();
                     return;
                 }
             };
@@ -245,11 +196,22 @@ fn main() {
             ] {
                 // Clone since we're moving into a thread closure ...
                 let cwd = cwd.clone();
-                let tx = tx_io.clone();
                 io_threads.push(thread::spawn(move || {
-                    stream_output(target, reader, cwd, tx);
+                    stream_output(&target, reader, &cwd);
                 }));
             }
+            // {
+            //     let cwd = cwd.clone();
+            //     io_threads.push(thread::spawn(move || {
+            //         stream_output(io::stdout(), o_reader, cwd);
+            //     }));
+            // }
+            // {
+            //     let cwd = cwd.clone();
+            //     io_threads.push(thread::spawn(move || {
+            //         stream_output(io::stderr(), e_reader, cwd);
+            //     }));
+            // }
 
             // Wait for the child to finish ...
             let result: ProcessExitResult = child.wait().into();
@@ -267,47 +229,47 @@ fn main() {
                 t.join().unwrap();
             }
 
-            tx_res
-                .send(ProcessResult {
-                    cwd: cwd,
-                    exit: result,
-                })
-                .unwrap();
+            tx.send(ProcessResult { exit: result, cwd }).unwrap();
         }));
     }
 
     // Join our cwd threads.
-    for t in cwd_threads {
+    for t in cmd_threads {
         // We unwrap because frankly, I don't know what to do if one of our threads panics, so we
         // may as well panic too.
         t.join().unwrap();
-        results.push(rx_res.recv().unwrap());
+        results.push(rx.recv().unwrap());
     }
 
     let mut e_code = 0;
+    let stderr = io::stderr();
+
     for result in results {
         // Handle the results.
-        let tx_io = tx_io.clone();
         match result.exit {
             ProcessExitResult::Code(0) => {}
             ProcessExitResult::Code(code) => {
-                print_error(tx_io, result.cwd, format!("exited {:}\n", code));
+                write_with_prefix(
+                    stderr.lock(),
+                    &result.cwd,
+                    format!("exited {:}\n", code).as_bytes(),
+                );
                 e_code = 1;
             }
             ProcessExitResult::Signal(signal) => {
-                print_error(tx_io, result.cwd, format!("signaled {:}\n", signal));
+                write_with_prefix(
+                    stderr.lock(),
+                    &result.cwd,
+                    format!("signaled {:}\n", signal).as_bytes(),
+                );
                 e_code = 1;
             }
             ProcessExitResult::IOError(err) => {
-                print_error(tx_io, result.cwd, format!("{:}\n", err));
+                write_with_prefix(stderr.lock(), &result.cwd, format!("{:}\n", err).as_bytes());
                 e_code = 1;
             }
         };
     }
-
-    // Close our io thread sender so it can finish up ...
-    drop(tx_io);
-    io_thread.join().unwrap();
 
     exit(e_code);
 }
