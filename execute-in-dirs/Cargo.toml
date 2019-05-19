@@ -7,4 +7,4 @@ edition = "2018"
 [dependencies]
 structopt = "0.2.15"
 os_pipe = "0.8.1"
-nix = "0.13.0"
+std-semaphore = "0.1.0"

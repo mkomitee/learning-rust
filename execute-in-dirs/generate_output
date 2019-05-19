@@ -1,0 +1,6 @@
+#!/bin/sh
+for i in $(seq $1); do
+    echo stdout $i;
+    echo stderr $i > /dev/stderr;
+    sleep 0.1
+done

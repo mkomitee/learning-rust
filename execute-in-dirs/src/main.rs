@@ -1,11 +1,14 @@
 use os_pipe::{pipe, PipeReader};
+use std::borrow::ToOwned;
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{exit, Command, ExitStatus};
 use std::result::Result;
+use std::sync::Arc;
 use std::thread;
+use std_semaphore::Semaphore;
 use structopt;
 use structopt::StructOpt;
 
@@ -23,6 +26,8 @@ struct Opt {
     // OsString because files & arguments are not guaranteed to be utf8.
     #[structopt(parse(from_os_str), raw(last = "true", required = "true"))]
     arg: Vec<OsString>,
+    #[structopt(short = "c", long = "max-concurrency", default_value = "8")]
+    concurrency: isize,
 }
 
 enum ProcessResult {
@@ -116,94 +121,137 @@ fn print_error(prefix: &[u8], message: String) {
 }
 
 fn main() {
+    // Thank you structopt.
     let opt = Opt::from_args();
-    let mut e_code = 0;
 
-    // We expect here because we know structopt will ensure that opt.arg has at least one element,
-    // so we won't have a None.
-    let (exec, args) = opt.arg.split_first().expect("structopt lied?");
+    // We need to split argv0 from the rest for Command ...
+    let exec = opt.arg[0].to_owned();
+    let args: Vec<OsString> = opt.arg.iter().skip(1).map(ToOwned::to_owned).collect();
 
-    // TODO: run the commands concurrently with a max concurrency using threads.
+    // We limit concurrency with a semaphore ...
+    let semaphore = Arc::new(Semaphore::new(opt.concurrency));
+
+    // Track our threads so we can ensure they complete ...
+    let mut cwd_threads = Vec::new();
+
+    // TODO: Don't print out resulting signal / exit code / error until end.
+    // TODO: Exit with appropriate exit code
     for cwd in opt.directory {
-        // Setup our pipes for the command ...
-        let (o_reader, o_writer) = match pipe() {
-            Ok((o_reader, o_writer)) => (o_reader, o_writer),
-            Err(err) => {
-                print_error(cwd.as_bytes(), format!("{:}\n", err));
-                e_code = 1;
-                continue;
+        let exec = exec.clone();
+        let args = args.clone();
+        let semaphore = semaphore.clone();
+        cwd_threads.push(thread::spawn(move || {
+            // let mut e_code = 0;
+
+            // Acquire our guard to limit concurrency
+            let _guard = semaphore.access();
+
+            // Setup our pipes for the command
+            let (o_reader, o_writer) = match pipe() {
+                Ok((o_reader, o_writer)) => (o_reader, o_writer),
+                // Couldn't create our pipes. I suspect a ulimit issue, but there's nothing we can
+                // do but note the failure and return.
+                Err(err) => {
+                    print_error(cwd.as_bytes(), format!("{:}\n", err));
+                    // e_code = 1;
+                    return;
+                }
+            };
+            let (e_reader, e_writer) = match pipe() {
+                Ok((e_reader, e_writer)) => (e_reader, e_writer),
+                // Couldn't create our pipes. I suspect a ulimit issue, but there's nothing we can
+                // do but note the failure and return.
+                Err(err) => {
+                    print_error(cwd.as_bytes(), format!("{:}\n", err));
+                    // e_code = 1;
+                    return;
+                }
+            };
+
+            // Spawn our command ...
+            let child = Command::new(exec)
+                .args(args)
+                .current_dir(&cwd)
+                .stdout(o_writer)
+                .stderr(e_writer)
+                .spawn();
+
+            // We're going to write directly to stdout/stderr instead of using println or eprintln
+            // because we want to prefix very line with the cwd we're using and the cwd's are
+            // OsStrings because they're not limited to utf8 characters. As such, we need bytes for
+            // writing.
+            let cwd = cwd.as_bytes().to_owned();
+
+            let mut child = match child {
+                Ok(child) => child,
+                // The child couldn't spawn, nothing left to do but note the failure and return.
+                Err(err) => {
+                    print_error(&cwd, format!("{:}\n", err));
+                    // e_code = 1;
+                    return;
+                }
+            };
+
+            // We're spawning threads to process stdout/stderr from our commands. Track them to
+            // join.
+            let mut io_threads = Vec::new();
+
+            // This feels stupid, but I can't figure out how to pass the actual stdout / stderr to
+            // the same function -- using a Box<dyn Write> works but we lose the ability to lock
+            // it.
+            for (target, reader) in vec![
+                (StdIOTarget::Stdout, o_reader),
+                (StdIOTarget::Stderr, e_reader),
+            ] {
+                // Clone since we're moving into a thread closure ...
+                let cwd = cwd.clone();
+                io_threads.push(thread::spawn(move || {
+                    stream_output(&target, reader, &cwd);
+                }));
             }
-        };
-        let (e_reader, e_writer) = match pipe() {
-            Ok((e_reader, e_writer)) => (e_reader, e_writer),
-            Err(err) => {
-                print_error(cwd.as_bytes(), format!("{:}\n", err));
-                e_code = 1;
-                continue;
+
+            // Wait for the child to finish ...
+            let result: ProcessResult = child.wait().into();
+
+            // Drop the child since it owns the write side of our pipes, and it needs to be dropped
+            // to close them so our io threads can get an EOF. This is what the docs say to do so
+            // I'm including it to be complete, but in practice, I've still never seen the EOF
+            // happen.
+            drop(child);
+
+            // Join our io threads.
+            for t in io_threads {
+                // We unwrap because frankly, I don't know what to do if one of our threads panics,
+                // so we may as well panic too.
+                t.join().unwrap();
             }
-        };
 
-        // Spawn our command ...
-        let child = Command::new(exec)
-            .args(args)
-            .current_dir(&cwd)
-            .stdout(o_writer)
-            .stderr(e_writer)
-            .spawn();
-
-        // We're going to write directly to stdout/stderr instead of using println or eprintln
-        // because we want to prefix e very line with the cwd we're using and the cwd's are
-        // OsStrings because they're not limited to utf8 characters. As such, we need bytes for
-        // writing.
-        let cwd = cwd.as_bytes().to_owned();
-
-        let mut child = match child {
-            Ok(child) => child,
-            Err(err) => {
-                print_error(&cwd, format!("{:}\n", err));
-                e_code = 1;
-                continue;
-            }
-        };
-
-        // We're spawning threads to process stdout/stderr from our commands. Track them to join.
-        let mut io_threads = Vec::new();
-        for (target, reader) in vec![
-            (StdIOTarget::Stdout, o_reader),
-            (StdIOTarget::Stderr, e_reader),
-        ] {
-            // Clone since we're moving into a thread closure ...
-            let cwd = cwd.clone();
-            io_threads.push(thread::spawn(move || {
-                stream_output(&target, reader, &cwd);
-            }));
-        }
-
-        // Wait for the child to finish ...
-        let result: ProcessResult = child.wait().into();
-
-        for t in io_threads {
-            // We unwrap because frankly, I don't know what to do if one of our threads panics, so
-            // we may as well panic too.
-            //
-            t.join().unwrap();
-        }
-
-        match result {
-            ProcessResult::Code(0) => {}
-            ProcessResult::Code(code) => {
-                print_error(&cwd, format!("exited {:}\n", code));
-                e_code = 1;
-            }
-            ProcessResult::Signal(signal) => {
-                print_error(&cwd, format!("signaled {:}\n", signal));
-                e_code = 1;
-            }
-            ProcessResult::IOError(err) => {
-                print_error(&cwd, format!("{:}\n", err));
-                e_code = 1;
-            }
-        };
+            // Handle the results.
+            match result {
+                ProcessResult::Code(0) => {}
+                ProcessResult::Code(code) => {
+                    print_error(&cwd, format!("exited {:}\n", code));
+                    // e_code = 1;
+                }
+                ProcessResult::Signal(signal) => {
+                    print_error(&cwd, format!("signaled {:}\n", signal));
+                    // e_code = 1;
+                }
+                ProcessResult::IOError(err) => {
+                    print_error(&cwd, format!("{:}\n", err));
+                    // e_code = 1;
+                }
+            };
+        }));
     }
+
+    // Join our cwd threads.
+    for t in cwd_threads {
+        // We unwrap because frankly, I don't know what to do if one of our threads panics, so we
+        // may as well panic too.
+        t.join().unwrap();
+    }
+
+    let e_code = 0;
     exit(e_code);
 }
