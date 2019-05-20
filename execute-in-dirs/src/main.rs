@@ -99,8 +99,14 @@ fn stream_output(target: &IOHandle, reader: PipeReader, prefix: &OsStr) {
     }
 }
 
+fn trim_end(s: &[u8], v: u8) -> &[u8] {
+    let end_idx = s.len() - s.iter().rev().take_while(|&&x| x == v).count();
+    &s[..end_idx]
+}
+
 fn write_with_prefix<T: Write>(mut handle: T, prefix: &OsStr, message: &[u8]) {
-    for token in &[prefix.as_bytes(), b": ", message] {
+    // for token in &[trim_end(prefix.as_bytes(), 47u8), b": ", message] {
+    for token in &[trim_end(prefix.as_bytes(), '/' as u8), b": ", message] {
         // If we can't write (e.g. the reader has closed it's end of the pipe) ignore the error and
         // continue to run.
         let _ = handle.write(token);
