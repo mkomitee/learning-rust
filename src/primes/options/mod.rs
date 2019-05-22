@@ -4,6 +4,7 @@ use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
 #[structopt(
+    name = "primes",
     author = "\n",
     about = "    Calculate primes with multiple algorithms.",
     raw(setting = "structopt::clap::AppSettings::AllowNegativeNumbers")
