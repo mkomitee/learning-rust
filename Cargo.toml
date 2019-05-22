@@ -9,3 +9,7 @@ structopt = "0.2.15"
 os_pipe = "0.8.1"
 std-semaphore = "0.1.0"
 failure = "0.1.5"
+
+[features]
+default = []
+nightly = []

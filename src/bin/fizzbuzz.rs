@@ -1,8 +1,11 @@
-#![feature(int_error_matching)]
-use core::num::IntErrorKind;
+#![cfg_attr(feature = "nightly", feature(int_error_matching))]
 use std::io::{self, BufWriter, Write};
 use std::{env, fmt, num};
 
+#[cfg(feature = "nightly")]
+use core::num::IntErrorKind;
+
+#[cfg(feature = "nightly")]
 enum Error {
     ArgumentMissing,
     ArgumentEmpty,
@@ -11,6 +14,7 @@ enum Error {
     IO,
 }
 
+#[cfg(feature = "nightly")]
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let reason = match self {
@@ -24,6 +28,7 @@ impl fmt::Debug for Error {
     }
 }
 
+#[cfg(feature = "nightly")]
 impl From<num::ParseIntError> for Error {
     fn from(err: num::ParseIntError) -> Error {
         match err.kind() {
@@ -31,6 +36,32 @@ impl From<num::ParseIntError> for Error {
             IntErrorKind::Overflow => Error::ArgumentOverflow,
             _ => Error::ArgumentInvalid,
         }
+    }
+}
+
+#[cfg(not(feature = "nightly"))]
+enum Error {
+    ArgumentMissing,
+    ArgumentInvalid,
+    IO,
+}
+
+#[cfg(not(feature = "nightly"))]
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let reason = match self {
+            Error::ArgumentMissing => "not enough arguments specified",
+            Error::ArgumentInvalid => "specified argument is invalid",
+            Error::IO => "io error",
+        };
+        write!(f, "{}", reason)
+    }
+}
+
+#[cfg(not(feature = "nightly"))]
+impl From<num::ParseIntError> for Error {
+    fn from(_err: num::ParseIntError) -> Error {
+        Error::ArgumentInvalid
     }
 }
 
