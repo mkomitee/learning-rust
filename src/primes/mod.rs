@@ -1,3 +1,3 @@
-mod naive;
-mod options;
-mod sieve;
+pub mod naive;
+pub mod options;
+pub mod sieve;

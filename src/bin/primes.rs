@@ -1,5 +1,5 @@
 use failure::{err_msg, Error};
-use primes::options::{Algorithm, Opt};
+use learning_rust::primes::options::{Algorithm, Opt};
 use std::io::{self, BufWriter, Write};
 use structopt::StructOpt;
 
@@ -9,7 +9,7 @@ fn main() -> Result<(), Error> {
     let opt = Opt::from_args();
 
     let primes = match opt.algorithm {
-        Algorithm::Naive => primes::naive::primes(opt.max),
+        Algorithm::Naive => learning_rust::primes::naive::primes(opt.max),
         Algorithm::Sieve => {
             // Sieve allocates a vector sized at opt.max + 1. This limits us to addressable memory
             // on the system based on the size of usize.
@@ -19,7 +19,7 @@ fn main() -> Result<(), Error> {
                     (std::usize::MAX - 1)
                 )));
             }
-            primes::sieve::primes(opt.max)
+            learning_rust::primes::sieve::primes(opt.max)
         }
     };
 

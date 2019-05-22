@@ -1,1 +1,1 @@
-mod primes;
+pub mod primes;
