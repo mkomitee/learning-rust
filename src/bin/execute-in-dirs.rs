@@ -17,7 +17,8 @@ use structopt::StructOpt;
 #[derive(Debug, StructOpt)]
 #[structopt(
     name = "execute-in-dirs",
-    about = "Execute the same command in multiple directories."
+    about = "Execute the same command in multiple directories.",
+    author = ""
 )]
 struct Opt {
     /// Directories in which to execute command

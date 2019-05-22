@@ -1,9 +1,5 @@
-mod naive;
-mod options;
-mod sieve;
-
 use failure::{err_msg, Error};
-use options::{Algorithm, Opt};
+use primes::options::{Algorithm, Opt};
 use std::io::{self, BufWriter, Write};
 use structopt::StructOpt;
 
@@ -13,7 +9,7 @@ fn main() -> Result<(), Error> {
     let opt = Opt::from_args();
 
     let primes = match opt.algorithm {
-        Algorithm::Naive => naive::primes(opt.max),
+        Algorithm::Naive => primes::naive::primes(opt.max),
         Algorithm::Sieve => {
             // Sieve allocates a vector sized at opt.max + 1. This limits us to addressable memory
             // on the system based on the size of usize.
@@ -23,7 +19,7 @@ fn main() -> Result<(), Error> {
                     (std::usize::MAX - 1)
                 )));
             }
-            sieve::primes(opt.max)
+            primes::sieve::primes(opt.max)
         }
     };
 

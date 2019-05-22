@@ -1,10 +1,11 @@
 [package]
-name = "primes"
+name = "learning-rust"
 version = "0.1.0"
 authors = ["Michael Komitee <mkomitee@gmail.com>"]
 edition = "2018"
-description = "Calculate primes with multiple algorithms."
 
 [dependencies]
-structopt = "0.2"
+structopt = "0.2.15"
+os_pipe = "0.8.1"
+std-semaphore = "0.1.0"
 failure = "0.1.5"
