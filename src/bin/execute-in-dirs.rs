@@ -1,5 +1,4 @@
 use os_pipe::{pipe, PipeReader};
-use std::borrow::ToOwned;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, BufReader, Write};
@@ -248,11 +247,11 @@ fn process_results(results: Vec<ProcessResult>) -> i32 {
 
 fn main() {
     // Thank you structopt.
-    let opt = Opt::from_args();
+    let mut opt = Opt::from_args();
 
     // We need to split argv0 from the rest for Command
-    let exec = opt.arg[0].to_owned();
-    let args: Vec<OsString> = opt.arg.iter().skip(1).map(ToOwned::to_owned).collect();
+    let exec = opt.arg.remove(0);
+    let args = opt.arg;
 
     // Processing our results at the end
     let mut results = Vec::new();
